@@ -24,7 +24,7 @@ The implementation is an integrative clinical–transcriptomic model using:
 
 
 ## Repository Structure
-- data
+- data (rds files could not be uploded on github due to size)
   - UROMOL_TaLG.teachingcohort.rds
   - knowles_matched_TaLG_final.rds
 - code
