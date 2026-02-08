@@ -50,8 +50,11 @@ Run classifier.Rmd first. Don't clear the objects saved. Then run classifier.vis
 ## Repository Structure
 - data 
 - code
-  - classifier.Rmd
-  - classifier.visualizations.Rmd
+  - classifier_git.Rmd
+  - classifier_visualizations.Rmd
+- htmls
+  - classifier_git.html
+  - classifier_visualization.html
 - figures (folder)
 
 ## Workflow
