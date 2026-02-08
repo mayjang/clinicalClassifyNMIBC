@@ -1,0 +1,501 @@
+---
+title: "assignment2"
+output: html_document
+date: "2026-02-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Classifier Visualization Section
+## if not already, please run classifier.Rmd first and ensure all the objects saved are still in the global environment before running this file.
+
+```{r library, include=FALSE}
+suppressPackageStartupMessages({
+  library(caret)
+  library(limma)
+  library(glmnet)
+  library(pROC)
+  library(survival)
+  library(ggplot2)
+  library(gridExtra)
+  library(grid)
+  library(PRROC)
+  library(dplyr)
+})
+
+
+set.seed(1)
+
+obj <- readRDS("/Users/mayjang/Desktop/BIOF520/assignment2/data/classifier_objects.rds")
+list2env(obj, envir = .GlobalEnv)
+rm(obj)
+
+stopifnot(exists("probs_all"), exists("main_model"))
+probs <- probs_all[[main_model]]
+
+```
+
+## Helper functions for Visualizations
+```{r visualization_helper_functions}
+conf_mat_2x2 <- function(truth_fac, prob_or_pred, thr = NULL, input = c("prob","pred")) {
+  input <- match.arg(input)
+  if (input == "prob") {
+    stopifnot(!is.null(thr))
+    pred_fac <- factor(ifelse(prob_or_pred >= thr, "Rec", "NoRec"), levels = c("NoRec", "Rec"))
+  } else {
+    pred_fac <- factor(as.character(prob_or_pred), levels = c("NoRec","Rec"))
+  }
+  cm <- matrix(0, 2, 2,
+               dimnames = list(Truth = c("NoRec", "Rec"),
+                               Pred  = c("NoRec", "Rec")))
+  cm["NoRec", "NoRec"] <- sum(truth_fac == "NoRec" & pred_fac == "NoRec")
+  cm["NoRec", "Rec"]   <- sum(truth_fac == "NoRec" & pred_fac == "Rec")
+  cm["Rec",   "NoRec"] <- sum(truth_fac == "Rec"   & pred_fac == "NoRec")
+  cm["Rec",   "Rec"]   <- sum(truth_fac == "Rec"   & pred_fac == "Rec")
+  cm
+}
+
+plot_conf_counts <- function(cm, title) {
+  TN <- cm["NoRec","NoRec"]
+  FP <- cm["NoRec","Rec"]
+  FN <- cm["Rec","NoRec"]
+  TP <- cm["Rec","Rec"]
+  
+  z_plot <- rbind(
+    c(FP, TP),  # bottom row (Pred = Rec)
+    c(TN, FN)   # top row (Pred = NoRec)
+  )
+  
+  op <- par(mar = c(6, 6, 4, 3))
+  on.exit(par(op), add = TRUE)
+  
+  image(x = 1:2, y = 1:2, z = t(z_plot),
+        axes = FALSE,
+        xlab = "True label", ylab = "Predicted label",
+        main = title)
+  
+  axis(1, at = 1:2, labels = c("NoRec", "Rec"), las = 2)
+  axis(2, at = 1:2, labels = c("Rec", "NoRec"), las = 2)
+  
+  text(1, 2, paste0("TN\n", TN), cex = 1.1)
+  text(2, 2, paste0("FN\n", FN), cex = 1.1)
+  text(1, 1, paste0("FP\n", FP), cex = 1.1)
+  text(2, 1, paste0("TP\n", TP), cex = 1.1)
+  
+  mtext(paste0("N = ", sum(cm)), side = 3, line = 0.2, cex = 0.9)
+}
+
+compute_pr_curve <- function(truth_fac, prob_rec) {
+  truth01 <- ifelse(truth_fac == "Rec", 1L, 0L)
+  thr <- sort(unique(prob_rec), decreasing = TRUE)
+  precision <- recall <- numeric(length(thr))
+  for (i in seq_along(thr)) {
+    pred <- ifelse(prob_rec >= thr[i], 1L, 0L)
+    TP <- sum(truth01 == 1 & pred == 1)
+    FP <- sum(truth01 == 0 & pred == 1)
+    FN <- sum(truth01 == 1 & pred == 0)
+    precision[i] <- ifelse(TP + FP == 0, NA, TP/(TP+FP))
+    recall[i]    <- ifelse(TP + FN == 0, NA, TP/(TP+FN))
+  }
+  data.frame(recall = recall, precision = precision)
+}
+
+plot_pr_overlay_multi <- function(curves, labels, title) {
+  op <- par(mar=c(5,5,4,2))
+  on.exit(par(op), add = TRUE)
+  
+  cols <- c("dodgerblue3","darkorange3","seagreen4","purple3","brown3")[seq_along(curves)]
+  plot(NA, xlim=c(0,1), ylim=c(0,1),
+       xlab="Recall (Sensitivity)", ylab="Precision (PPV)",
+       main=title)
+  grid()
+  for (i in seq_along(curves)) {
+    df <- curves[[i]]
+    keep <- which(is.finite(df$recall) & is.finite(df$precision))
+    lines(df$recall[keep], df$precision[keep], col=cols[i], lwd=2)
+  }
+  legend("bottomleft", legend=labels, col=cols, lwd=2, bty="n", cex=0.9)
+}
+
+plot_km_by_risk <- function(time_m, event01, risk, title) {
+  keep <- which(!is.na(time_m) & !is.na(event01) & !is.na(risk))
+  if (length(keep) < 10) { 
+    plot.new(); title(paste0(title, "\n(not enough complete cases)")); 
+    return() 
+  }
+
+  time_m  <- time_m[keep]
+  event01 <- event01[keep]
+  risk    <- risk[keep]
+  
+  grp <- ifelse(risk >= median(risk, na.rm = TRUE), "HighRisk", "LowRisk")
+  grp <- factor(grp, levels = c("LowRisk", "HighRisk"))
+
+  fit <- survfit(Surv(time_m, event01) ~ grp)
+
+  # nicer margins
+  op <- par(mar = c(5.5, 5.5, 4.5, 2))
+  on.exit(par(op), add = TRUE)
+
+  plot(fit,
+       col = c("dodgerblue3", "firebrick3"),
+       lwd = 2.5,
+       xlab = "Time (months)",
+       ylab = "Recurrence-free probability",
+       main = title,
+       mark.time = TRUE,
+       conf.int = FALSE)
+
+  legend("bottomleft",
+         legend = levels(grp),
+         col = c("dodgerblue3", "firebrick3"),
+         lwd = 2.5,
+         bty = "n")
+
+  sd <- survdiff(Surv(time_m, event01) ~ grp)
+  pval <- 1 - pchisq(sd$chisq, df = 1)
+  mtext(paste0("Log-rank p = ", signif(pval, 3)),
+        side = 3, line = 0.3, adj = 0)
+}
+
+plot_km_by_risk_colored <- function(time_m, event01, risk, title, cutoff = NULL) {
+  keep <- which(!is.na(time_m) & !is.na(event01) & !is.na(risk) & is.finite(risk))
+  if (length(keep) < 10) {
+    plot.new(); title(paste0(title, "\n(not enough complete cases)"))
+    return(invisible(NULL))
+  }
+
+  time_m  <- time_m[keep]
+  event01 <- event01[keep]
+  risk    <- risk[keep]
+
+  # Choose cutoff: user-provided or median
+  if (is.null(cutoff) || !is.finite(cutoff)) {
+    cutoff <- median(risk, na.rm = TRUE)
+  }
+
+  grp <- ifelse(risk >= cutoff, "HighRisk", "LowRisk")
+  grp <- factor(grp, levels = c("LowRisk", "HighRisk"))
+
+  # Guardrail: if only one group, KM/log-rank not defined
+  if (length(unique(grp)) < 2) {
+    plot.new()
+    title(paste0(title, "\n(only one risk group at cutoff=", signif(cutoff, 3), ")"))
+    mtext("Try a different cutoff (e.g., median) or check risk distribution.", side=3, line=0.2)
+    return(invisible(NULL))
+  }
+
+  fit <- survival::survfit(survival::Surv(time_m, event01) ~ grp)
+
+  op <- par(mar = c(5.5, 5.5, 4.5, 2))
+  on.exit(par(op), add = TRUE)
+
+  cols <- c("dodgerblue3", "firebrick3")
+  plot(fit,
+       col = cols,
+       lwd = 2.5,
+       xlab = "Time (months)",
+       ylab = "Recurrence-free probability",
+       main = title,
+       mark.time = TRUE,
+       conf.int = FALSE)
+
+  legend("bottomleft",
+         legend = levels(grp),
+         col = cols,
+         lwd = 2.5,
+         bty = "n")
+
+  sd <- survival::survdiff(survival::Surv(time_m, event01) ~ grp)
+  pval <- 1 - pchisq(sd$chisq, df = 1)
+  mtext(paste0("Cutoff = ", signif(cutoff, 3), " | Log-rank p = ", signif(pval, 3)),
+        side = 3, line = 0.3, adj = 0)
+
+  invisible(list(cutoff = cutoff, pval = pval))
+}
+
+
+# metrics: AUC, C-index (UROMOL test)
+auc_safe <- function(y_fac, p) {
+  r <- tryCatch(pROC::roc(ifelse(y_fac=="Rec",1,0), p, quiet=TRUE), error=function(e) NULL)
+  if (is.null(r)) return(NA_real_)
+  as.numeric(pROC::auc(r))
+}
+
+cindex_safe <- function(time_m, event01, risk) {
+  keep <- which(is.finite(time_m) & !is.na(event01) & is.finite(risk))
+  if (length(keep) < 10) return(NA_real_)
+  s <- survival::concordance(survival::Surv(time_m[keep], event01[keep]) ~ risk[keep])
+  as.numeric(s$concordance)
+}
+
+
+```
+
+
+## Survival Evaluation
+```{r survival_eval_classifier, echo=TRUE}
+# Survival aeare evaluation of classifier risk scores 
+#  RFS_time + Recurrence for evaluation (C-index)
+
+cindex_safe <- function(time_m, event01, risk) {
+  keep <- which(is.finite(time_m) & !is.na(event01) & is.finite(risk))
+  if (length(keep) < 10) return(NA_real_)
+  s <- survival::concordance(survival::Surv(time_m[keep], event01[keep]) ~ risk[keep])
+  as.numeric(s$concordance)
+}
+
+#UROMOL test survival fields aligned to test IDs 
+test_ids <- rownames(u_ids[idx_test])
+u_time_test <- as.numeric(uromol$RFS_time[match(test_ids, rownames(uromol$exprs))])
+u_event_test <- as.integer(uromol$Recurrence[match(test_ids, rownames(uromol$exprs))])
+
+# Knowles survival fields aligned to labeled Knowles ids
+k_time <- as.numeric(knowles$RFS_time[match(k_ids, rownames(knowles$exprs))])
+
+
+cat("\n C-index (classifier risk scores) \n")
+cat("UROMOL TEST C-index (My model): ",
+    signif(cindex_safe(u_time_test, u_event_test, probs$test), 4), "\n")
+
+if (length(unique(k_event[!is.na(k_event)])) >= 2) {
+  cat("Knowles C-index (My model): ",
+      signif(cindex_safe(k_time, k_event, probs$knowles), 4), "\n")
+} else {
+  cat("Knowles C-index (My model): NA (single class / insufficient events)\n")
+}
+
+```
+
+## Confusion Matrix Plots
+
+```{r confusion_matrix, echo=FALSE}
+
+# UROMOL test — My model
+pred_my_test <- factor(ifelse(probs$test >= thr_used, "Rec", "NoRec"),
+                       levels = c("NoRec","Rec"))
+truth_my_test <- factor(as.character(y_test), levels = c("NoRec","Rec"))
+
+cm_my_test_caret <- caret::confusionMatrix(data = pred_my_test,
+                                           reference = truth_my_test,
+                                           positive = "Rec")
+print(cm_my_test_caret)
+
+# UROMOL test — classifyNMIBC
+pred_nm_test <- factor(ifelse(u_nm_score >= nm_thr, "Rec", "NoRec"),
+                       levels = c("NoRec","Rec"))
+truth_nm_test <- truth_my_test
+
+cm_nm_test_caret <- caret::confusionMatrix(data = pred_nm_test,
+                                           reference = truth_nm_test,
+                                           positive = "Rec")
+print(cm_nm_test_caret)
+
+# Knowles — My model 
+cm_my_kn_caret <- NULL
+cm_nm_kn_caret <- NULL
+
+if (length(unique(k_y_fac)) >= 2) {
+  truth_kn <- factor(as.character(k_y_fac), levels = c("NoRec","Rec"))
+
+  pred_my_kn <- factor(ifelse(probs$knowles >= thr_used, "Rec", "NoRec"),
+                       levels = c("NoRec","Rec"))
+  cm_my_kn_caret <- caret::confusionMatrix(data = pred_my_kn,
+                                           reference = truth_kn,
+                                           positive = "Rec")
+  print(cm_my_kn_caret)
+
+  pred_nm_kn <- factor(ifelse(k_nm_score >= nm_thr, "Rec", "NoRec"),
+                       levels = c("NoRec","Rec"))
+  cm_nm_kn_caret <- caret::confusionMatrix(data = pred_nm_kn,
+                                           reference = truth_kn,
+                                           positive = "Rec")
+  print(cm_nm_kn_caret)
+
+} else {
+  cat("\nKnowles confusion: NA (only one class present)\n")
+  print(table(k_y_fac))
+}
+
+if (!is.null(cm_my_test_caret)) {
+  cat("\nUROMOL TEST 2x2 table (My model):\n")
+  print(cm_my_test_caret$table)
+}
+if (!is.null(cm_nm_test_caret)) {
+  cat("\nUROMOL TEST 2x2 table (classifyNMIBC):\n")
+  print(cm_nm_test_caret$table)
+}
+if (!is.null(cm_my_kn_caret)) {
+  cat("\nKnowles 2x2 table (My model):\n")
+  print(cm_my_kn_caret$table)
+}
+if (!is.null(cm_nm_kn_caret)) {
+  cat("\nKnowles 2x2 table (classifyNMIBC):\n")
+  print(cm_nm_kn_caret$table)
+}
+
+
+# Save figure: all confusion matrices
+
+out_dir <- "figures"
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+safe_model <- if (exists("main_model")) gsub("[^A-Za-z0-9_]+", "_", main_model) else "my_model"
+
+cm_to_df <- function(cm_table, dataset_label, model_label) {
+  df <- as.data.frame(cm_table)
+  colnames(df) <- c("Pred", "True", "Freq")  # caret: rows=Pred, cols=True
+  df$Dataset <- dataset_label
+  df$Model <- model_label
+  df
+}
+
+cm_list <- list(
+  cm_to_df(cm_my_test_caret$table, "UROMOL TEST", "My model"),
+  cm_to_df(cm_nm_test_caret$table, "UROMOL TEST", "classifyNMIBC")
+)
+
+if (!is.null(cm_my_kn_caret)) {
+  cm_list <- c(cm_list, list(
+    cm_to_df(cm_my_kn_caret$table, "Knowles", "My model")
+  ))
+}
+if (!is.null(cm_nm_kn_caret)) {
+  cm_list <- c(cm_list, list(
+    cm_to_df(cm_nm_kn_caret$table, "Knowles", "classifyNMIBC")
+  ))
+}
+
+cm_df <- do.call(rbind, cm_list)
+
+# Ensure consistent axis ordering
+cm_df$True <- factor(cm_df$True, levels = c("NoRec", "Rec"))
+cm_df$Pred <- factor(cm_df$Pred, levels = c("NoRec", "Rec"))
+
+# For nice ordering of facets
+cm_df$Dataset <- factor(cm_df$Dataset, levels = c("UROMOL TEST", "Knowles"))
+cm_df$Model <- factor(cm_df$Model, levels = unique(cm_df$Model))
+
+p_all_cm <- ggplot(cm_df, aes(x = True, y = Pred, fill = Freq)) +
+  geom_tile(color = "white", linewidth = 0.7) +
+  geom_text(aes(label = Freq), size = 6, fontface = "bold") +
+  facet_grid(Dataset ~ Model) +
+  scale_fill_gradient(low = "grey92", high = "steelblue") +
+  labs(
+    title = "Confusion Matrices",
+    x = "True label",
+    y = "Predicted label",
+    fill = "Count"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.grid = element_blank(),
+    strip.text = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+# Save ONE PNG
+png_file <- file.path(out_dir, paste0("confusion_matrices_all_", safe_model, ".png"))
+ggsave(png_file, plot = p_all_cm, width = 11, height = 6, units = "in", dpi = 300)
+
+print(p_all_cm)
+
+```
+
+
+```{r pr_curves, echo=FALSE}
+
+pr_my_test <- compute_pr_curve(y_test, probs$test)
+pr_nm_test <- compute_pr_curve(y_test, u_nm_score)
+
+if (length(unique(k_y_fac)) >= 2) {
+  pr_my_kn <- compute_pr_curve(k_y_fac, probs$knowles)
+  pr_nm_kn <- compute_pr_curve(k_y_fac, k_nm_score)
+  plot_pr_overlay_multi(
+    curves = list(pr_my_test, pr_nm_test, pr_my_kn, pr_nm_kn),
+    labels = c("My model (Clinical + DE) – UROMOL test",
+               "classifyNMIBC – UROMOL test",
+               "My model (Clinical + DE) – Knowles",
+               "classifyNMIBC – Knowles"),
+    title = "Precision and Recall: My model vs classifyNMIBC"
+  )
+} else {
+  plot_pr_overlay_multi(
+    curves = list(pr_my_test, pr_nm_test),
+    labels = c("My model (Clinical + DE) – UROMOL test",
+               "classifyNMIBC – UROMOL test"),
+    title = "Precision and Recall: My model vs classifyNMIBC"
+  )
+}
+```
+
+
+```{r km_curves, echo=FALSE}
+# KM curves for My model:
+# - UROMOL TRAIN
+# - UROMOL TEST
+# - Knowles
+
+
+out_dir <- "figures"
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+
+safe_model <- gsub("[^A-Za-z0-9_]+", "_", main_model)
+base_name  <- file.path(out_dir, paste0("km_my_model_", safe_model, "_panel_1x3"))
+
+op <- par(no.readonly = TRUE)
+par(mfrow = c(1,3))
+
+u_time_all  <- as.numeric(uromol$RFS_time[match(u_ids, rownames(uromol$exprs))])
+u_event_all <- as.integer(uromol$Recurrence[match(u_ids, rownames(uromol$exprs))])
+
+# TRAIN
+u_time_train  <- u_time_all[idx_train]
+u_event_train <- u_event_all[idx_train]
+
+# TEST
+u_time_test  <- u_time_all[idx_test]
+u_event_test <- u_event_all[idx_test]
+
+p_train <- probs_all[[main_model]]$train
+
+p_test <- probs_all[[main_model]]$test
+p_kn   <- probs_all[[main_model]]$knowles
+
+
+plot_km_by_risk_colored(u_time_train, u_event_train, p_train,
+                        paste0("UROMOL TRAIN KM\nMy model"))
+plot_km_by_risk_colored(u_time_test, u_event_test, p_test,
+                        paste0("UROMOL TEST KM\nMy model"))
+plot_km_by_risk_colored(k_time, k_event, p_kn,
+                        paste0("Knowles KM\nMy model"))
+
+par(op) 
+
+# save as png
+png(paste0(base_name, ".png"), width = 19, height = 5.5, units = "in", res = 300)
+op2 <- par(no.readonly = TRUE)
+par(mfrow = c(1,3))
+
+plot_km_by_risk_colored(u_time_train, u_event_train, p_train,
+                        paste0("UROMOL TRAIN KM\nMy model"))
+plot_km_by_risk_colored(u_time_test, u_event_test, p_test,
+                        paste0("UROMOL TEST KM\nMy model"))
+plot_km_by_risk_colored(k_time, k_event, p_kn,
+                        paste0("Knowles KM\nMy model"))
+
+par(op2)
+dev.off()
+
+
+```
+
+
+```{r summaries, echo=FALSE}
+cat("\nMy model Knowles prob summary:\n"); print(summary(probs$knowles))
+cat("\nclassifyNMIBC Knowles score summary:\n"); print(summary(k_nm_score))
+```
+
