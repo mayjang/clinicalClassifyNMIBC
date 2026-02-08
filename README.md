@@ -44,6 +44,9 @@ BiocManager::install("limma")
 Install classifyNMIBC for baseline model:
 devtools::install_github("sialindskrog/classifyNMIBC", build_vignettes = FALSE, upgrade = "never")
 
+## Running Sequence
+Run classifier.Rmd first. Don't clear the objects saved. Then run classifier.visualizations.Rmd to create visualizations.
+
 ## Repository Structure
 - data 
 - code
