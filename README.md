@@ -56,23 +56,45 @@ Run classifier.Rmd first. Don't clear the objects saved. Then run classifier.vis
 
 ## Workflow
 
-```mermaid
-flowchart TD
-  A[Load the data\nUROMOL (RNA-seq) + Knowles (microarray)] --> B[Define the prediction task\nRecurrence (0/1) → NoRec vs. Rec]
-  B --> C[Split UROMOL only\nStratified 75% train / 25% test\n]
-  C --> D[Clean + encode clinical features (learned on training)\n- fill missing numeric with training medians\n- categories → factors (+ NA)\n- one-hot encode]
-  C --> E[Clean + scale expression (learned on training)\n- fill missing gene values with training means\n- center/scale using traininf stats]
-  D --> F[Make TEST + Knowles clinical compatible\n- unseen → NA\n- add missing columns as zeros\n- drop extra columns]
-  E --> G[Make TEST + Knowles expression compatible\n- align gene space\n- fill missing genes\n- apply training scaling]
-  E --> H[Pick candidate genes (training only)\nlimma DE → top K genes]
-  H --> I[Build feature sets\nClinical-only / DE-only / Combined]
-  I --> J[Train models on training\nElastic net (caret/glmnet)\nRepeated CV]
-  I --> K[Build smaller interpretable model\nLASSO selects compact panel]
-  J --> L[Choose decision threshold (training only)\nROC + Youden’s J]
-  K --> L
-  L --> M[Evaluate on UROMOL Test\nConfusion matrix + KM curves]
-  L --> N[External validation on Knowles\nSame preprocessing + threshold]
-  A --> O[Baseline: classifyNMIBC\nTraining threshold]
-  O --> M
-  O --> N
+```text
+Input UROMOL + Knowles
+            |
+            v
+ Output: Recurrence (NoRec vs Rec)
+            |
+            v
+Split UROMOL (75% train / 25% test)
+            |
+            +---------------------------+
+            |                           |
+            v                           v
+Clinical preprocessing (training)     Expression preprocessing (training)
+- fill missing numeric (train medians)  - fill missing genes (train means)
+- clean categories (+ NAs)          - center/scale using train stats
+- one-hot encode                        |
+            |                           |
+            v                           v
+Project Test data + Knowles clinical         Project Test data + Knowles expression
+- align dummy columns                   - align gene space to UROMOL
+- unseen → Unknown                      - fill missing genes
+- add missing columns (0)               - apply train scaling
+            |                           |
+            +------------+--------------+
+                         v
+Feature selection (training): limma DE → top genes
+                         |
+                         v
+Build feature sets (clinical categories / DE-only / combined)
+                         |
+                         v
+Train models on Training data (elastic net, LASSO panel)
+                         |
+                         v
+Choose threshold on Training data (ROC Youden)
+                         |
+                         v
+Evaluate on UROMOL TEST + external Knowles for validation
+- confusion matrices + metrics
+- Kaplan–Meier curves
+Compare to baseline (classifyNMIBC; threshold from triaining UROMOL data)
 
